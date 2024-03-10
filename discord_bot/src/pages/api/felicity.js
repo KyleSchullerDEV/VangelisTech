@@ -1,61 +1,88 @@
+import { createClient } from 'redis';
 import OpenAI from "openai";
+import { NextResponse } from "next/server";
 
-const { Client } = require("pg");
-
+// Initialize the OpenAI client with your API key
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const client = new Client({
-  connectionString: process.env.POSTGRES_URL,
+// Connect to your Redis instance with Redis Labs connection details
+const redisClient = createClient({
+  password: process.env.REDIS_PASSWORD, // Use environment variable for the password
+  socket: {
+    host: process.env.REDIS_HOST, // Use environment variable for the host
+    port: process.env.REDIS_PORT, // Use environment variable for the port, ensure it's a number if required
+  }
 });
-client.connect();
+redisClient.connect();
 
-async function createConversationsTableIfNotExists() {
+export const runtime = "edge";
+
+// The rest of the serverless function remains the same
+export default async function handler(req) {
+  // Allow only POST requests
+  if (req.method !== "POST") {
+    return new NextResponse(JSON.stringify({ message: "Method not allowed" }), {
+      status: 405,
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+  }
+
   try {
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS conversations (
-        conversation_id TEXT PRIMARY KEY,
-        history JSONB
-      )
-    `);
-    console.log("Conversations table created successfully");
+    // Extracting the message and conversation ID from the request body
+    const { message, conversationId } = await req.json();
+
+    // Retrieve conversation history from Redis
+    const conversationHistoryJson = await redisClient.get(conversationId);
+    const conversationHistory = conversationHistoryJson ? JSON.parse(conversationHistoryJson) : [];
+
+    // Generate response using the OpenAI Chat API
+    const response = await callOpenAI(conversationHistory, message);
+
+    // Update conversation history in Redis
+    const newHistory = [...conversationHistory, { role: "user", content: message }, { role: "assistant", content: response }];
+    await redisClient.set(conversationId, JSON.stringify(newHistory));
+
+    // Return the AI's response
+    return new NextResponse(JSON.stringify({ response }), {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
   } catch (error) {
-    console.error("Error creating conversations table:", error);
+    console.error(error);
+    return new NextResponse(JSON.stringify({ message: "Internal Server Error" }), {
+      status: 500,
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
   }
 }
 
-createConversationsTableIfNotExists();
-
-module.exports = async (req, res) => {
-  if (req.method === "POST") {
-    const { message, conversationId } = req.body;
-    
-    // Retrieve conversation history from Postgres
-    const result = await client.query(
-      "SELECT * FROM conversations WHERE conversation_id = $1",
-      [conversationId]
-    );
-    const conversationHistory = result.rows[0]?.history || [];
-    
-    // Generate response using GPT-3.5 API
-    const completion = await openai.createChatCompletion({
-      model: "gpt-3.5-turbo",
+// Function to call OpenAI and return the response
+async function callOpenAI(conversationHistory, message) {
+  try {
+    // Adjust the request as needed for your use case
+    const completion = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo", // or whichever model you're using
       messages: [
-        ...conversationHistory,
+        {
+          role: "system",
+          content: "You are a helpful assistant.",
+        },
+        ...conversationHistory.map(({ role, content }) => ({ role, content })),
         { role: "user", content: message },
       ],
     });
-    
-    const response = completion.data.choices[0].message.content;
-    
-    // Update conversation history in Postgres
-    const newHistory = [...conversationHistory, { role: "user", content: message }, { role: "assistant", content: response }];
-    await client.query(
-      "INSERT INTO conversations (conversation_id, history) VALUES ($1, $2) ON CONFLICT (conversation_id) DO UPDATE SET history = $2",
-      [conversationId, JSON.stringify(newHistory)]
-    );
-    
-    res.status(200).json({ response });
-  } else {
-    res.status(405).json({ error: "Method not allowed" });
+
+    // Extract the response text from the completion object
+    const responseText = completion.data.choices[0].message.content;
+    return responseText;
+  } catch (error) {
+    console.error('Error calling OpenAI:', error);
+    return "I encountered an error while processing your request."; // Fallback response
   }
-};
+}
