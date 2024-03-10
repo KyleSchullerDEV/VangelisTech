@@ -9,6 +9,22 @@ const client = new Client({
 });
 client.connect();
 
+async function createConversationsTableIfNotExists() {
+  try {
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS conversations (
+        conversation_id TEXT PRIMARY KEY,
+        history JSONB
+      )
+    `);
+    console.log("Conversations table created successfully");
+  } catch (error) {
+    console.error("Error creating conversations table:", error);
+  }
+}
+
+createConversationsTableIfNotExists();
+
 module.exports = async (req, res) => {
   if (req.method === "POST") {
     const { message, conversationId } = req.body;
